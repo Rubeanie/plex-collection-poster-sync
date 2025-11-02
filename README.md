@@ -40,7 +40,7 @@ services:
       POSTER_FOLDER: "/posters" # Path inside container where images folder is mounted
       CRON_SCHEDULE: "0 */8 * * *" # CRON expression for scheduled runs (every 8 hours by default)
       RUN_ON_CREATION: "true" # Set to "true" to run sync immediately on container startup, set to "false" to wait for CRON schedule
-      RESET_COLLECTION: "false" # Set to "true" to force update all posters even if unchanged
+      REAPPLY_POSTERS: "false" # Set to "true" to force update all posters even if unchanged
       NORMALIZE_HYPHENS: "true" # Set to "false" to treat hyphens and spaces as different characters
       TZ: "Australia/Perth" # Replace with your timezone
       # LOG_PATH: "/app/run.log" # Path for log file
@@ -136,7 +136,7 @@ docker logs --tail 100 collection-poster-sync
 
 #### Poster Not Updating
 
-- Check if `RESET_COLLECTION` is set to `false` and the poster hash matches
+- Check if `REAPPLY_POSTERS` is set to `false` and the poster hash matches
 - Verify file permissions on the poster folder
 - Check logs for specific error messages
 

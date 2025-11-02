@@ -22,7 +22,7 @@ class CollectionPosterSync:
         self.PLEX_URL = os.getenv("PLEX_URL", "").rstrip("/")
         self.PLEX_TOKEN = os.getenv("PLEX_TOKEN", "")
         self.POSTER_FOLDER = os.getenv("POSTER_FOLDER", "/posters")
-        self.RESET_COLLECTION = os.getenv("RESET_COLLECTION", "false").lower() == "true"
+        self.REAPPLY_POSTERS = os.getenv("REAPPLY_POSTERS", "false").lower() == "true"
         self.NORMALIZE_HYPHENS = os.getenv("NORMALIZE_HYPHENS", "true").lower() == "true"
         self.REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
         self.MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
@@ -297,7 +297,7 @@ class CollectionPosterSync:
         """
         self.logger.info("Starting poster sync process")
         self.logger.info(f"Poster folder: {self.POSTER_FOLDER}")
-        self.logger.info(f"RESET_COLLECTION: {self.RESET_COLLECTION}")
+        self.logger.info(f"REAPPLY_POSTERS: {self.REAPPLY_POSTERS}")
         self.logger.info(f"NORMALIZE_HYPHENS: {self.NORMALIZE_HYPHENS}")
 
         # Get all image files
@@ -330,7 +330,7 @@ class CollectionPosterSync:
             # Check if we need to update the poster
             should_update = True
 
-            if not self.RESET_COLLECTION:
+            if not self.REAPPLY_POSTERS:
                 # Calculate hash of the image we want to upload
                 new_image_hash = self.calculate_file_hash(image_path)
 
