@@ -36,14 +36,18 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
           tags: |
-            # For releases: tag with version and latest/beta
-            type=semver,pattern={{version}},enable=${{ github.event_name == 'release' }}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'release' }}
-            type=semver,pattern={{major}},enable=${{ github.event_name == 'release' }}
+            # Pre-releases: version + beta
+            type=semver,pattern={{version}},enable=${{ github.event_name == 'release' && github.event.release.prerelease }}
             type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease }}
+            # Stable releases: full set + latest
+            type=semver,pattern={{version}},enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
+            type=semver,pattern={{major}},enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
             type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
-            # For pushes: tag as dev
+            # Branch pushes: dev only
             type=raw,value=dev,enable=${{ github.event_name == 'push' }}
 
       - name: Build and push Docker image
