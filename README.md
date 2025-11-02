@@ -161,4 +161,4 @@ This project was inspired by:
 
 ### License
 
-MIT
+[MIT](https://github.com/Rubeanie/plex-collection-poster-sync/blob/main/LICENSE)
