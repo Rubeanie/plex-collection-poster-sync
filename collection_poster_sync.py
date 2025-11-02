@@ -3,6 +3,7 @@ import re
 import logging
 import hashlib
 import time
+import sys
 import requests
 from plexapi.server import PlexServer
 from requests.adapters import HTTPAdapter
@@ -23,7 +24,9 @@ class CollectionPosterSync:
         self.PLEX_TOKEN = os.getenv("PLEX_TOKEN", "")
         self.POSTER_FOLDER = os.getenv("POSTER_FOLDER", "/posters")
         self.REAPPLY_POSTERS = os.getenv("REAPPLY_POSTERS", "false").lower() == "true"
-        self.NORMALIZE_HYPHENS = os.getenv("NORMALIZE_HYPHENS", "true").lower() == "true"
+        self.NORMALIZE_HYPHENS = (
+            os.getenv("NORMALIZE_HYPHENS", "true").lower() == "true"
+        )
         self.REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
         self.MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
@@ -42,15 +45,72 @@ class CollectionPosterSync:
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
 
-        # Setup logging
-        log_path = os.getenv("LOG_PATH", "/app/run.log")
-        logging.basicConfig(
-            filename=log_path,
-            encoding="utf-8",
-            level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-        )
+        # Setup logging with custom formatter
+        class PrefixFormatter(logging.Formatter):
+            """Custom formatter that adds prefix tags like [INF], [DBG], [WRN], [SUC]"""
+
+            def format(self, record):
+                # Map log levels to prefixes
+                prefix_map = {
+                    logging.DEBUG: "[DBG]",
+                    logging.INFO: "[INF]",
+                    logging.WARNING: "[WRN]",
+                    logging.ERROR: "[ERR]",
+                    logging.CRITICAL: "[CRI]",
+                }
+                prefix = prefix_map.get(record.levelno, "[INF]")
+
+                # Check if message starts with [SUC] for success messages
+                if (
+                    hasattr(record, "msg")
+                    and isinstance(record.msg, str)
+                    and record.msg.startswith("[SUC]")
+                ):
+                    prefix = "[SUC]"
+                    record.msg = record.msg[5:].strip()  # Remove [SUC] from message
+
+                # Override levelname to include prefix
+                record.levelname = prefix
+                return super().format(record)
+
+        # Get log level from environment variable (default: INFO)
+        log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+        log_level_map = {
+            "DEBUG": logging.DEBUG,
+            "INFO": logging.INFO,
+            "WARNING": logging.WARNING,
+            "ERROR": logging.ERROR,
+            "CRITICAL": logging.CRITICAL,
+        }
+        log_level = log_level_map.get(log_level_str, logging.INFO)
+
+        # Create logger
         self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.DEBUG)  # Logger itself handles all levels
+
+        # Remove existing handlers
+        self.logger.handlers = []
+
+        # Console handler (stdout) - default to INFO level, can be overridden by LOG_LEVEL
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(
+            log_level
+        )  # Only show messages at this level and above
+        console_formatter = PrefixFormatter("%(levelname)s %(message)s")
+        console_handler.setFormatter(console_formatter)
+        self.logger.addHandler(console_handler)
+
+        # File handler - optional, only if LOG_PATH is set (always DEBUG for file)
+        log_path = os.getenv("LOG_PATH")
+        if log_path:
+            file_handler = logging.FileHandler(log_path, encoding="utf-8")
+            file_handler.setLevel(logging.DEBUG)  # File always gets all logs
+            file_formatter = logging.Formatter(
+                "%(asctime)s - %(levelname)s - %(message)s"
+            )
+            file_handler.setFormatter(file_formatter)
+            self.logger.addHandler(file_handler)
+
         self.logger.info("Starting collection poster sync script.")
 
         # Validate required configuration
@@ -60,8 +120,37 @@ class CollectionPosterSync:
 
         # Connect to Plex
         try:
-            self.PLEX = PlexServer(self.PLEX_URL, self.PLEX_TOKEN)
-            self.logger.info(f"Connected to Plex server at {self.PLEX_URL}")
+            self.logger.info(f"Connecting to Plex server at {self.PLEX_URL}")
+            # Use a consistent client identifier to avoid "new device" notifications
+            # This makes Plex recognize this as the same device every time
+            client_identifier = os.getenv(
+                "PLEX_CLIENT_IDENTIFIER", "plex-collection-poster-sync"
+            )
+
+            # Set headers on our session before creating PlexServer
+            self.session.headers.update(
+                {
+                    "X-Plex-Client-Identifier": client_identifier,
+                    "X-Plex-Product": "Plex Collection Poster Sync",
+                    "X-Plex-Version": "1.0.0",
+                }
+            )
+
+            # Create PlexServer with our configured session
+            # Note: plexapi may create its own session, but we'll try to use ours
+            self.PLEX = PlexServer(self.PLEX_URL, self.PLEX_TOKEN, session=self.session)
+
+            # Ensure the PlexServer's session also has our headers
+            if hasattr(self.PLEX, "_session") and self.PLEX._session:
+                self.PLEX._session.headers.update(
+                    {
+                        "X-Plex-Client-Identifier": client_identifier,
+                        "X-Plex-Product": "Plex Collection Poster Sync",
+                        "X-Plex-Version": "1.0.0",
+                    }
+                )
+
+            self.logger.info(f"Successfully connected to Plex server")
         except Exception as e:
             self.logger.error(f"Failed to connect to Plex: {e}")
             raise
@@ -79,16 +168,20 @@ class CollectionPosterSync:
         """
         # Convert to lowercase and strip whitespace
         normalized = name.lower().strip()
-        
+
         # If NORMALIZE_HYPHENS is enabled, treat hyphens and spaces as equivalent
         if self.NORMALIZE_HYPHENS:
             # Replace both spaces and dashes with a single space
             normalized = re.sub(r"[\s\-]+", " ", normalized)
         else:
             # Only normalize multiple spaces/dashes separately, but don't convert hyphens to spaces
-            normalized = re.sub(r"\s+", " ", normalized)  # Multiple spaces -> single space
-            normalized = re.sub(r"-+", "-", normalized)  # Multiple dashes -> single dash
-        
+            normalized = re.sub(
+                r"\s+", " ", normalized
+            )  # Multiple spaces -> single space
+            normalized = re.sub(
+                r"-+", "-", normalized
+            )  # Multiple dashes -> single dash
+
         return normalized
 
     def get_image_files(self):
@@ -124,7 +217,7 @@ class CollectionPosterSync:
                     collection_name = os.path.splitext(filename)[0]
                     image_files.append((filename, file_path, collection_name))
                     self.logger.debug(
-                        f"Found image: {filename} -> collection: {collection_name}"
+                        f"Found image file: {filename} -> collection name: '{collection_name}'"
                     )
 
         except Exception as e:
@@ -141,7 +234,7 @@ class CollectionPosterSync:
             target_name: The normalized collection name to find
 
         Returns:
-            Collection object if found, None otherwise
+            Tuple of (Collection object, library_title, library_key) if found, (None, None, None) otherwise
         """
         normalized_target = self.normalize_collection_name(target_name)
 
@@ -161,9 +254,9 @@ class CollectionPosterSync:
 
                         if collection_normalized == normalized_target:
                             self.logger.debug(
-                                f'Found collection "{collection.title}" in library "{library.title}"'
+                                f"Found collection '{collection.title}' (ratingKey {collection.ratingKey}) in library '{library.title}' (section {library.key})"
                             )
-                            return collection
+                            return collection, library.title, library.key
 
                 except Exception as e:
                     self.logger.warning(
@@ -174,7 +267,7 @@ class CollectionPosterSync:
         except Exception as e:
             self.logger.error(f"Error searching for collection: {e}")
 
-        return None
+        return None, None, None
 
     def get_current_poster_key(self, collection):
         """
@@ -209,11 +302,14 @@ class CollectionPosterSync:
             Hex digest of the file hash, or None if error
         """
         try:
+            self.logger.debug(f"Calculating hash for file: {file_path}")
             hash_sha256 = hashlib.sha256()
             with open(file_path, "rb") as f:
                 for chunk in iter(lambda: f.read(4096), b""):
                     hash_sha256.update(chunk)
-            return hash_sha256.hexdigest()
+            file_hash = hash_sha256.hexdigest()
+            self.logger.debug(f"File hash: {file_hash[:16]}...")
+            return file_hash
         except Exception as e:
             self.logger.warning(f"Error calculating hash for {file_path}: {e}")
             return None
@@ -231,8 +327,14 @@ class CollectionPosterSync:
         try:
             poster_key = self.get_current_poster_key(collection)
             if not poster_key:
+                self.logger.debug(
+                    f"No current poster found for collection '{collection.title}'"
+                )
                 return None
 
+            self.logger.debug(
+                f"Downloading current poster for '{collection.title}' (key: {poster_key})"
+            )
             # Build full URL for the poster
             poster_url = self.PLEX.url(poster_key)
             headers = {"X-Plex-Token": self.PLEX_TOKEN}
@@ -244,10 +346,17 @@ class CollectionPosterSync:
             if response.status_code == 200:
                 # Calculate hash of downloaded content
                 hash_sha256 = hashlib.sha256(response.content).hexdigest()
+                self.logger.debug(
+                    f"Current poster hash for '{collection.title}': {hash_sha256[:16]}..."
+                )
                 return hash_sha256
+            else:
+                self.logger.warning(
+                    f"Failed to download poster (status {response.status_code}) for '{collection.title}'"
+                )
         except Exception as e:
             self.logger.debug(
-                f"Error getting current poster hash for {collection.title}: {e}"
+                f"Error getting current poster hash for '{collection.title}': {e}"
             )
 
         return None
@@ -271,21 +380,24 @@ class CollectionPosterSync:
         # Retry upload on failure
         for attempt in range(self.MAX_RETRIES):
             try:
+                self.logger.debug(
+                    f"Uploading poster for collection '{collection.title}' (attempt {attempt + 1}/{self.MAX_RETRIES})"
+                )
                 collection.uploadPoster(filepath=image_path)
                 self.logger.info(
-                    f'Successfully uploaded poster for collection "{collection.title}"'
+                    f"[SUC] Successfully uploaded poster for collection '{collection.title}'"
                 )
                 return True
             except Exception as e:
                 if attempt < self.MAX_RETRIES - 1:
                     wait_time = 2**attempt  # Exponential backoff
                     self.logger.warning(
-                        f'Upload attempt {attempt + 1} failed for "{collection.title}", retrying in {wait_time}s: {e}'
+                        f"Upload attempt {attempt + 1} failed for '{collection.title}', retrying in {wait_time}s: {e}"
                     )
                     time.sleep(wait_time)
                 else:
                     self.logger.error(
-                        f'Error uploading poster for collection "{collection.title}" after {self.MAX_RETRIES} attempts: {e}'
+                        f"Error uploading poster for collection '{collection.title}' after {self.MAX_RETRIES} attempts: {e}"
                     )
                     return False
 
@@ -298,9 +410,14 @@ class CollectionPosterSync:
         self.logger.info("Starting poster sync process")
         self.logger.info(f"Poster folder: {self.POSTER_FOLDER}")
         self.logger.info(f"REAPPLY_POSTERS: {self.REAPPLY_POSTERS}")
+        if self.REAPPLY_POSTERS:
+            self.logger.info(
+                "Reapply posters is enabled. Posters will be reapplied for all collections."
+            )
         self.logger.info(f"NORMALIZE_HYPHENS: {self.NORMALIZE_HYPHENS}")
 
         # Get all image files
+        self.logger.info(f"Scanning poster folder: {self.POSTER_FOLDER}")
         image_files = self.get_image_files()
 
         if not image_files:
@@ -315,23 +432,42 @@ class CollectionPosterSync:
 
         # Process each image file
         for filename, image_path, collection_name in image_files:
+            self.logger.info("")
             self.logger.info(
-                f'Processing: {filename} -> collection: "{collection_name}"'
+                f"Processing: {filename} -> collection: '{collection_name}'"
             )
 
             # Find collection in Plex
-            collection = self.find_collection_by_name(collection_name)
+            self.logger.debug(
+                f"Searching for collection with name: '{collection_name}'"
+            )
+            collection, library_title, library_key = self.find_collection_by_name(
+                collection_name
+            )
 
             if not collection:
                 self.logger.warning(f"Collection not found for image: {filename}")
                 not_found_count += 1
                 continue
 
+            # Log collection found with library info
+            if library_title and library_key:
+                self.logger.info(
+                    f"Found collection '{collection.title}' (ratingKey {collection.ratingKey}) in library '{library_title}' (section {library_key})"
+                )
+            else:
+                self.logger.info(
+                    f"Found collection '{collection.title}' (ratingKey {collection.ratingKey})"
+                )
+
             # Check if we need to update the poster
             should_update = True
 
             if not self.REAPPLY_POSTERS:
                 # Calculate hash of the image we want to upload
+                self.logger.debug(
+                    "Comparing poster hashes to determine if update is needed"
+                )
                 new_image_hash = self.calculate_file_hash(image_path)
 
                 if new_image_hash:
@@ -341,10 +477,16 @@ class CollectionPosterSync:
                     # If hashes match, skip update
                     if current_poster_hash and current_poster_hash == new_image_hash:
                         self.logger.info(
-                            f'Poster for collection "{collection.title}" is already set to this image, skipping'
+                            f"Poster for collection '{collection.title}' is already set to this image, skipping"
                         )
                         should_update = False
                         skipped_count += 1
+                    elif current_poster_hash:
+                        self.logger.debug(f"Poster hashes differ - update needed")
+                    else:
+                        self.logger.debug(f"No current poster found - update needed")
+            else:
+                self.logger.debug("REAPPLY_POSTERS is enabled - forcing update")
 
             # Upload the poster if needed
             if should_update:
@@ -354,16 +496,23 @@ class CollectionPosterSync:
                     skipped_count += 1
 
         # Summary
-        self.logger.info("Poster sync completed")
+        self.logger.info("")
+        self.logger.info(f"[SUC] Poster sync completed")
         self.logger.info(
-            f"Updated: {updated_count}, Skipped: {skipped_count}, Not found: {not_found_count}"
+            f"Summary: Updated: {updated_count}, Skipped: {skipped_count}, Not found: {not_found_count}"
         )
 
 
 if __name__ == "__main__":
+    sync = None
     try:
         sync = CollectionPosterSync()
         sync.sync_posters()
     except Exception as e:
-        logging.error(f"Fatal error: {e}")
+        # Try to use the logger if sync object was created
+        if sync is not None and hasattr(sync, "logger"):
+            sync.logger.error(f"Fatal error: {e}")
+        else:
+            # Fallback if we can't create the sync object
+            print(f"[ERR] Fatal error: {e}", file=sys.stderr)
         raise

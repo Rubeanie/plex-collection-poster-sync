@@ -10,7 +10,7 @@ A Docker container that automatically syncs collection posters from a folder of 
 - **Scheduled Execution**: Runs on a configurable CRON schedule
 - **Supported Formats**: jpg, jpeg, png, tbn
 - **Error Handling**: Retry logic for API calls and robust error handling
-- **Logging**: Comprehensive logging for debugging and monitoring
+- **Logging**: Comprehensive logging with configurable verbosity (INFO by default, DEBUG available)
 
 ### Requirements
 
@@ -43,9 +43,7 @@ services:
       REAPPLY_POSTERS: "false" # Set to "true" to force update all posters even if unchanged
       NORMALIZE_HYPHENS: "true" # Set to "false" to treat hyphens and spaces as different characters
       TZ: "Australia/Perth" # Replace with your timezone
-      # LOG_PATH: "/app/run.log" # Path for log file
-      # REQUEST_TIMEOUT: "30" # Timeout in seconds for HTTP requests
-      # MAX_RETRIES: "3" # Maximum number of retry attempts for failed operations
+      # Optional: Advanced configuration options in docker-compose.yml
     volumes:
       - /path/to/your/posters:/posters # Path to your local folder containing poster images
 ```
@@ -116,7 +114,7 @@ docker exec collection-poster-sync python /app/collection_poster_sync.py
 
 ### Logging
 
-Logs are written to `/app/run.log` by default (configurable via `LOG_PATH`). View logs:
+By default, logs are output to the console (stdout). View logs using Docker:
 
 ```bash
 # Follow logs
@@ -125,6 +123,14 @@ docker logs -f collection-poster-sync
 # View last 100 lines
 docker logs --tail 100 collection-poster-sync
 ```
+
+**Logging Configuration:**
+- **Console output**: Always enabled, defaults to INFO level
+- **File logging**: Optional, enabled by setting `LOG_PATH` environment variable
+- **Log levels**: Control verbosity with `LOG_LEVEL` (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+- **Debug mode**: Set `LOG_LEVEL=DEBUG` to see detailed debug information
+
+**Note**: Debug messages (`[DBG]`) are hidden by default. Set `LOG_LEVEL=DEBUG` to enable verbose output for troubleshooting.
 
 ### Troubleshooting
 

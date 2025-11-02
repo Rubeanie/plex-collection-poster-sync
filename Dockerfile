@@ -1,21 +1,24 @@
 FROM python:3.10
 
-RUN apt-get -y update
-RUN apt-get -y install cron
+# Install system dependencies
+RUN apt-get -y update && \
+    apt-get -y install cron && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Setup directory and copying files
-WORKDIR /
-RUN mkdir app
 WORKDIR /app
 COPY ./start.sh ./start.sh
 COPY ./collection_poster_sync.py ./collection_poster_sync.py
 COPY ./requirements.txt ./requirements.txt
-RUN chmod +x start.sh
+# Fix Windows line endings (CRLF -> LF) and make executable
+RUN sed -i 's/\r$//' start.sh && chmod +x start.sh
 
-# Install Python packages.
-RUN pip install --upgrade pip
-RUN pip install -r /app/requirements.txt
+# Install Python packages
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r /app/requirements.txt
 
+# Create log file
 RUN touch /var/log/cron.log
 
 CMD ./start.sh
