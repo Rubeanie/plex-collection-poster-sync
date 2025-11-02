@@ -31,10 +31,16 @@ media/
 
 # Documentation
 *.md
-!README.md
 
 # Docker
 docker-compose.yml
+docker-compose.local.yml
+docker-compose.dockge.yml
 Dockerfile
 .dockerignore
 
+# Examples
+examples/
+
+# License
+LICENSE
