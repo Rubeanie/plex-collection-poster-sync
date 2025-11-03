@@ -8,12 +8,11 @@ else
   CRON_EXPRESSION="0 */8 * * *"
 fi
 
-# Use /tmp for files that need to be writable when user is overridden at runtime
+# Use /tmp for crontab file (needs to be writable when user is overridden at runtime)
 CRONTAB_FILE="/tmp/crontab"
-LOG_FILE="/tmp/cron.log"
 
-# Create crontab file for supercronic (in /tmp to ensure writability when user is overridden)
-echo "$CRON_EXPRESSION /usr/local/bin/python /app/collection_poster_sync.py >> $LOG_FILE 2>&1" > "$CRONTAB_FILE"
+# Create crontab file for supercronic (output to stdout/stderr so docker logs captures it)
+echo "$CRON_EXPRESSION /usr/local/bin/python /app/collection_poster_sync.py" > "$CRONTAB_FILE"
 
 # Verify supercronic is executable
 if [ ! -x /usr/local/bin/supercronic ]; then
