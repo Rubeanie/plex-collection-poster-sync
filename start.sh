@@ -25,5 +25,5 @@ if [ -n "${RUN_ON_CREATION+1}" ] && [ "$RUN_ON_CREATION" = "true" ]; then
   /usr/local/bin/python /app/collection_poster_sync.py
 fi
 
-# Start supercronic with -quiet flag to suppress wrapper logs
-exec /usr/local/bin/supercronic -quiet "$CRONTAB_FILE"
+# Start supercronic with -passthrough-logs flag to suppress wrapper logs
+exec /usr/local/bin/supercronic -passthrough-logs "$CRONTAB_FILE"
