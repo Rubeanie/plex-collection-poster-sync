@@ -31,16 +31,18 @@ RUN getent group ${GROUP_ID} >/dev/null || groupadd -r -g ${GROUP_ID} appuser &&
 
 # Setup directory and copying files
 WORKDIR /app
-COPY ./start.sh ./start.sh
-COPY ./collection_poster_sync.py ./collection_poster_sync.py
 COPY ./requirements.txt ./requirements.txt
-# Fix Windows line endings (CRLF -> LF) and make executable
-RUN sed -i 's/\r$//' start.sh && chmod +x start.sh
 
 # Install Python packages (optimized for speed and caching)
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r /app/requirements.txt && \
     pip cache purge
+
+# Copy application files
+COPY ./start.sh ./start.sh
+COPY ./collection_poster_sync.py ./collection_poster_sync.py
+# Fix Windows line endings (CRLF -> LF) and make executable
+RUN sed -i 's/\r$//' start.sh && chmod +x start.sh
 
 # Create log directory with proper permissions (crontab created at runtime)
 # Use numeric UID/GID for chown to avoid issues if username doesn't exist
