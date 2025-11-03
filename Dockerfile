@@ -4,19 +4,20 @@ FROM python:3.14-slim
 ARG USER_ID=1000
 ARG GROUP_ID=1000
 ARG SUPERCRONIC_VERSION=0.2.38
+# TARGETARCH is automatically set by Docker Buildx for multi-architecture builds
+ARG TARGETARCH
 
 # Install system dependencies and supercronic
 RUN apt-get -y update && \
     apt-get -y install wget ca-certificates bash && \
-    ARCH=$(uname -m) && \
-    if [ "$ARCH" = "x86_64" ]; then \
+    if [ "$TARGETARCH" = "amd64" ]; then \
         ARCH_SUFFIX="amd64"; \
-    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
+    elif [ "$TARGETARCH" = "arm64" ]; then \
         ARCH_SUFFIX="arm64"; \
-    elif [ "$ARCH" = "armv7l" ] || [ "$ARCH" = "armhf" ]; then \
+    elif [ "$TARGETARCH" = "arm" ]; then \
         ARCH_SUFFIX="arm"; \
     else \
-        echo "Unsupported architecture: $ARCH" && exit 1; \
+        echo "Unsupported architecture: $TARGETARCH" >&2 && exit 1; \
     fi && \
     wget --tries=1 --timeout=10 -O /usr/local/bin/supercronic https://github.com/aptible/supercronic/releases/download/v${SUPERCRONIC_VERSION}/supercronic-linux-${ARCH_SUFFIX} && \
     test -s /usr/local/bin/supercronic || (echo "Failed to download supercronic binary or file is empty" >&2 && exit 1) && \
