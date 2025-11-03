@@ -24,10 +24,8 @@ if [ -n "${RUN_ON_CREATION+1}" ] && [ "$RUN_ON_CREATION" = "true" ]; then
   echo "RUN NOW"
   /usr/local/bin/python /app/collection_poster_sync.py
   echo ""
-  echo "[ENTRYPOINT] Starting supercronic in foreground..."
-  exec /usr/local/bin/supercronic /app/crontab
 else
   echo "RUN_ON_CREATION is disabled, script will run on CRON schedule"
-  echo "[ENTRYPOINT] Starting supercronic in foreground..."
-  exec /usr/local/bin/supercronic /app/crontab
 fi
+echo "[ENTRYPOINT] Starting supercronic in foreground..."
+exec /usr/local/bin/supercronic /app/crontab

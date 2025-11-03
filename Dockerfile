@@ -18,7 +18,8 @@ RUN apt-get -y update && \
     else \
         echo "Unsupported architecture: $ARCH" && exit 1; \
     fi && \
-    wget -O /usr/local/bin/supercronic https://github.com/aptible/supercronic/releases/download/v${SUPERCRONIC_VERSION}/supercronic-linux-${ARCH_SUFFIX} && \
+    wget --tries=1 --timeout=10 -O /usr/local/bin/supercronic https://github.com/aptible/supercronic/releases/download/v${SUPERCRONIC_VERSION}/supercronic-linux-${ARCH_SUFFIX} && \
+    test -s /usr/local/bin/supercronic || (echo "Failed to download supercronic binary or file is empty" >&2 && exit 1) && \
     chmod +x /usr/local/bin/supercronic && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
