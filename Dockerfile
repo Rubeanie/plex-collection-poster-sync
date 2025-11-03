@@ -9,7 +9,7 @@ ARG TARGETARCH
 
 # Install system dependencies and supercronic
 RUN apt-get -y update && \
-    apt-get -y install wget ca-certificates bash && \
+    apt-get -y install --no-install-recommends wget ca-certificates bash && \
     if [ "$TARGETARCH" = "amd64" ]; then \
         ARCH_SUFFIX="amd64"; \
     elif [ "$TARGETARCH" = "arm64" ]; then \
@@ -19,11 +19,11 @@ RUN apt-get -y update && \
     else \
         echo "Unsupported architecture: $TARGETARCH" >&2 && exit 1; \
     fi && \
-    wget --tries=1 --timeout=10 -O /usr/local/bin/supercronic https://github.com/aptible/supercronic/releases/download/v${SUPERCRONIC_VERSION}/supercronic-linux-${ARCH_SUFFIX} && \
+    wget --tries=1 --timeout=10 --quiet -O /usr/local/bin/supercronic https://github.com/aptible/supercronic/releases/download/v${SUPERCRONIC_VERSION}/supercronic-linux-${ARCH_SUFFIX} && \
     test -s /usr/local/bin/supercronic || (echo "Failed to download supercronic binary or file is empty" >&2 && exit 1) && \
     chmod +x /usr/local/bin/supercronic && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Create non-root user with configurable UID/GID
 RUN getent group ${GROUP_ID} >/dev/null || groupadd -r -g ${GROUP_ID} appuser && \
@@ -37,9 +37,10 @@ COPY ./requirements.txt ./requirements.txt
 # Fix Windows line endings (CRLF -> LF) and make executable
 RUN sed -i 's/\r$//' start.sh && chmod +x start.sh
 
-# Install Python packages
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r /app/requirements.txt
+# Install Python packages (optimized for speed and caching)
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r /app/requirements.txt && \
+    pip cache purge
 
 # Create log directory with proper permissions (crontab created at runtime)
 # Use numeric UID/GID for chown to avoid issues if username doesn't exist
