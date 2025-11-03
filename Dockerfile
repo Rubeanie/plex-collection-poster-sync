@@ -24,9 +24,8 @@ RUN apt-get -y update && \
     rm -rf /var/lib/apt/lists/*
 
 # Create non-root user with configurable UID/GID
-RUN groupadd -r -g ${GROUP_ID} appuser 2>/dev/null || true && \
-    useradd -r -u ${USER_ID} -g ${GROUP_ID} -d /app -s /bin/bash appuser 2>/dev/null || \
-    (getent passwd ${USER_ID} >/dev/null && echo "User ${USER_ID} already exists, continuing...") || true
+RUN getent group ${GROUP_ID} >/dev/null || groupadd -r -g ${GROUP_ID} appuser && \
+    getent passwd ${USER_ID} >/dev/null || useradd -r -u ${USER_ID} -g ${GROUP_ID} -d /app -s /bin/bash appuser
 
 # Setup directory and copying files
 WORKDIR /app
