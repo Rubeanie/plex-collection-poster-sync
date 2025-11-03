@@ -5,6 +5,7 @@ services:
     image: rubeanie/plex-collection-poster-sync:latest
     container_name: collection-poster-sync
     restart: unless-stopped
+    # user: "1000:1000" # Optional: Override the user/group IDs (default: 1000:1000)
     environment:
       PLEX_URL: "http://localhost:32400" # Plex server URL
       PLEX_TOKEN: "PLEX TOKEN" # Plex authentication token

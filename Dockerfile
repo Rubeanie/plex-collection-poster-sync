@@ -1,10 +1,33 @@
-FROM python:3.10
+FROM python:3.14-slim
 
-# Install system dependencies
+# Build arguments for user/group IDs (default: 1000:1000)
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+ARG SUPERCRONIC_VERSION=0.2.38
+# TARGETARCH is automatically set by Docker Buildx for multi-architecture builds
+ARG TARGETARCH
+
+# Install system dependencies and supercronic
 RUN apt-get -y update && \
-    apt-get -y install cron && \
+    apt-get -y install wget ca-certificates bash && \
+    if [ "$TARGETARCH" = "amd64" ]; then \
+        ARCH_SUFFIX="amd64"; \
+    elif [ "$TARGETARCH" = "arm64" ]; then \
+        ARCH_SUFFIX="arm64"; \
+    elif [ "$TARGETARCH" = "arm" ]; then \
+        ARCH_SUFFIX="arm"; \
+    else \
+        echo "Unsupported architecture: $TARGETARCH" >&2 && exit 1; \
+    fi && \
+    wget --tries=1 --timeout=10 -O /usr/local/bin/supercronic https://github.com/aptible/supercronic/releases/download/v${SUPERCRONIC_VERSION}/supercronic-linux-${ARCH_SUFFIX} && \
+    test -s /usr/local/bin/supercronic || (echo "Failed to download supercronic binary or file is empty" >&2 && exit 1) && \
+    chmod +x /usr/local/bin/supercronic && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+# Create non-root user with configurable UID/GID
+RUN getent group ${GROUP_ID} >/dev/null || groupadd -r -g ${GROUP_ID} appuser && \
+    getent passwd ${USER_ID} >/dev/null || useradd -r -u ${USER_ID} -g ${GROUP_ID} -d /app -s /bin/bash appuser
 
 # Setup directory and copying files
 WORKDIR /app
@@ -18,7 +41,12 @@ RUN sed -i 's/\r$//' start.sh && chmod +x start.sh
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r /app/requirements.txt
 
-# Create log file
-RUN touch /var/log/cron.log
+# Create log directory with proper permissions (crontab created at runtime)
+# Use numeric UID/GID for chown to avoid issues if username doesn't exist
+RUN mkdir -p /app && \
+    chown -R ${USER_ID}:${GROUP_ID} /app
+
+# Switch to non-root user (use numeric UID for reliability)
+USER ${USER_ID}:${GROUP_ID}
 
 CMD ./start.sh
