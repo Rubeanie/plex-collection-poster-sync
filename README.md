@@ -153,6 +153,15 @@ docker logs --tail 100 collection-poster-sync
 - Ensure `PLEX_TOKEN` is valid and not expired
 - Check network connectivity between container and Plex server
 
+#### "New Device" Notifications
+
+If you're receiving "new device" notifications from Plex every time the container restarts:
+
+- The script uses `plexapi`'s supported environment variables (`PLEXAPI_HEADER_*`) to maintain a stable client identifier
+- Set `PLEXAPI_HEADER_IDENTIFIER` to a consistent value (e.g., `"plex-collection-poster-sync"`) to prevent new device registrations
+- After fixing, remove duplicate device entries in Plex: **Account → Authorized Devices**
+- See `docker-compose.yml` for all available device identification environment variables
+
 ### Credits
 
 This project was inspired by:

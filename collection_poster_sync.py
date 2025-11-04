@@ -124,43 +124,41 @@ class CollectionPosterSync:
         # Connect to Plex
         try:
             self.logger.info(f"Connecting to Plex server at {self.PLEX_URL}")
-            # Use a consistent client identifier to avoid "new device" notifications
-            # This is the MOST IMPORTANT header - it must be consistent across container restarts
-            # If not set, Plex will generate a new device ID based on container metadata, causing notifications
-            client_identifier = os.getenv(
-                "PLEX_CLIENT_IDENTIFIER", "plex-collection-poster-sync"
-            )
 
-            # Auto-detect platform (Linux, Windows, Darwin, etc.)
-            # This ensures consistent platform identification without manual configuration
-            detected_platform = platform.system()
-            # Normalize platform name to match Plex conventions (Linux is most common in containers)
-            platform_name = os.getenv("PLEX_PLATFORM", detected_platform)
-            
-            # Device name - defaults to a descriptive name, can be customized
-            device_name = os.getenv("PLEX_DEVICE_NAME", "Plex Collection Poster Sync")
+            # Use plexapi's supported environment variables to ensure stable device identification
+            if "PLEXAPI_HEADER_IDENTIFIER" not in os.environ:
+                os.environ["PLEXAPI_HEADER_IDENTIFIER"] = "plex-collection-poster-sync"
+            if "PLEXAPI_HEADER_DEVICE_NAME" not in os.environ:
+                os.environ["PLEXAPI_HEADER_DEVICE_NAME"] = "Collection Poster Sync"
+            if "PLEXAPI_HEADER_DEVICE" not in os.environ:
+                os.environ["PLEXAPI_HEADER_DEVICE"] = "Docker"
+            if "PLEXAPI_HEADER_PRODUCT" not in os.environ:
+                os.environ["PLEXAPI_HEADER_PRODUCT"] = "Plex Collection Poster Sync"
+            if "PLEXAPI_HEADER_PLATFORM" not in os.environ:
+                detected_platform = platform.system()
+                os.environ["PLEXAPI_HEADER_PLATFORM"] = detected_platform
 
-            # Set all device identification headers required by Plex
-            # These headers ensure Plex recognizes this as the same device across container restarts
+            # Also set headers on our session as a fallback
             plex_headers = {
-                "X-Plex-Client-Identifier": client_identifier,  # CRITICAL: Must be consistent
-                    "X-Plex-Product": "Plex Collection Poster Sync",
-                    "X-Plex-Version": __version__,
-                "X-Plex-Device": device_name,
-                "X-Plex-Platform": platform_name,  # Auto-detected, can be overridden
-                }
-            
+                "X-Plex-Client-Identifier": os.environ["PLEXAPI_HEADER_IDENTIFIER"],
+                "X-Plex-Product": os.environ["PLEXAPI_HEADER_PRODUCT"],
+                "X-Plex-Version": __version__,
+                "X-Plex-Device": os.environ["PLEXAPI_HEADER_DEVICE"],
+                "X-Plex-Device-Name": os.environ[
+                    "PLEXAPI_HEADER_DEVICE_NAME"
+                ],  # Required for proper device identification
+                "X-Plex-Platform": os.environ["PLEXAPI_HEADER_PLATFORM"],
+            }
+
             self.session.headers.update(plex_headers)
 
-            # Create PlexServer with our configured session
-            # Note: plexapi may create its own session, but we'll try to use ours
+            # Create PlexServer - plexapi will now use the stable headers from env vars
             self.PLEX = PlexServer(self.PLEX_URL, self.PLEX_TOKEN, session=self.session)
 
-            # Ensure the PlexServer's session also has our headers
-            # This is critical because plexapi may use its own session internally
+            # Ensure the PlexServer's session also has our headers (fallback)
             if hasattr(self.PLEX, "_session") and self.PLEX._session:
                 self.PLEX._session.headers.update(plex_headers)
-            
+
             # Also check for http_session which some versions of plexapi use
             if hasattr(self.PLEX, "http_session") and self.PLEX.http_session:
                 self.PLEX.http_session.headers.update(plex_headers)
