@@ -4,10 +4,13 @@ import logging
 import hashlib
 import time
 import sys
+import platform
 import requests
 from plexapi.server import PlexServer
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+__version__ = "1.0.2"
 
 
 class CollectionPosterSync:
@@ -122,33 +125,45 @@ class CollectionPosterSync:
         try:
             self.logger.info(f"Connecting to Plex server at {self.PLEX_URL}")
             # Use a consistent client identifier to avoid "new device" notifications
-            # This makes Plex recognize this as the same device every time
+            # This is the MOST IMPORTANT header - it must be consistent across container restarts
+            # If not set, Plex will generate a new device ID based on container metadata, causing notifications
             client_identifier = os.getenv(
                 "PLEX_CLIENT_IDENTIFIER", "plex-collection-poster-sync"
             )
 
-            # Set headers on our session before creating PlexServer
-            self.session.headers.update(
-                {
-                    "X-Plex-Client-Identifier": client_identifier,
+            # Auto-detect platform (Linux, Windows, Darwin, etc.)
+            # This ensures consistent platform identification without manual configuration
+            detected_platform = platform.system()
+            # Normalize platform name to match Plex conventions (Linux is most common in containers)
+            platform_name = os.getenv("PLEX_PLATFORM", detected_platform)
+            
+            # Device name - defaults to a descriptive name, can be customized
+            device_name = os.getenv("PLEX_DEVICE_NAME", "Plex Collection Poster Sync")
+
+            # Set all device identification headers required by Plex
+            # These headers ensure Plex recognizes this as the same device across container restarts
+            plex_headers = {
+                "X-Plex-Client-Identifier": client_identifier,  # CRITICAL: Must be consistent
                     "X-Plex-Product": "Plex Collection Poster Sync",
-                    "X-Plex-Version": "1.0.0",
+                    "X-Plex-Version": __version__,
+                "X-Plex-Device": device_name,
+                "X-Plex-Platform": platform_name,  # Auto-detected, can be overridden
                 }
-            )
+            
+            self.session.headers.update(plex_headers)
 
             # Create PlexServer with our configured session
             # Note: plexapi may create its own session, but we'll try to use ours
             self.PLEX = PlexServer(self.PLEX_URL, self.PLEX_TOKEN, session=self.session)
 
             # Ensure the PlexServer's session also has our headers
+            # This is critical because plexapi may use its own session internally
             if hasattr(self.PLEX, "_session") and self.PLEX._session:
-                self.PLEX._session.headers.update(
-                    {
-                        "X-Plex-Client-Identifier": client_identifier,
-                        "X-Plex-Product": "Plex Collection Poster Sync",
-                        "X-Plex-Version": "1.0.0",
-                    }
-                )
+                self.PLEX._session.headers.update(plex_headers)
+            
+            # Also check for http_session which some versions of plexapi use
+            if hasattr(self.PLEX, "http_session") and self.PLEX.http_session:
+                self.PLEX.http_session.headers.update(plex_headers)
 
             self.logger.info(f"Successfully connected to Plex server")
         except Exception as e:

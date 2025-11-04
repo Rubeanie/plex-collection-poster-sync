@@ -16,6 +16,8 @@ services:
       NORMALIZE_HYPHENS: "true" # Set to "false" to treat hyphens and spaces as different characters
       TZ: "Australia/Perth" # Replace with your timezone
       # PLEX_CLIENT_IDENTIFIER: "plex-collection-poster-sync" # Unique identifier to prevent "new device" notifications (default: plex-collection-poster-sync)
+      # PLEX_DEVICE_NAME: "Plex Collection Poster Sync" # Device name shown in Plex (default: Plex Collection Poster Sync)
+      # PLEX_PLATFORM: "Linux" # Platform identifier - auto-detected if not set. Override only if needed. (default: auto-detected)
       # LOG_LEVEL: "INFO" # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: INFO)
       # LOG_PATH: "/app/run.log" # Path for log file
       # REQUEST_TIMEOUT: "30" # Timeout in seconds for HTTP requests
