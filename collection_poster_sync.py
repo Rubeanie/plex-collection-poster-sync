@@ -570,14 +570,14 @@ class CollectionPosterSync:
         # Check if we need to update the poster
         should_update = True
         new_poster_key = None
-        local_hash = None
+        # Always calculate hash for cache updates, even if REAPPLY_POSTERS is enabled
+        local_hash = self.calculate_file_hash(image_path)
 
         if not self.REAPPLY_POSTERS:
-            # Calculate hash of the image we want to upload
+            # Comparing poster hashes to determine if update is needed
             self.logger.debug(
                 "Comparing poster hashes to determine if update is needed"
             )
-            local_hash = self.calculate_file_hash(image_path)
 
             if local_hash:
                 # Check cache first
@@ -646,7 +646,7 @@ class CollectionPosterSync:
         # Upload the poster if needed
         if should_update:
             if self.upload_poster(collection, image_path):
-                # Update cache after successful upload
+                # Update cache after successful upload (always update if we have a hash)
                 if local_hash:
                     new_poster_key = self.get_current_poster_key(collection)
                     cache[rating_key] = {
