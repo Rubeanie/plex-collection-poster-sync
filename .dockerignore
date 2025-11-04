@@ -18,6 +18,9 @@ build/
 # Logs
 *.log
 
+# Runtime cache files
+.poster_cache.json
+
 # Old files (if they exist)
 Maintainerr_Overlay.py
 Maintainerr_Overlay_Notifications.py
@@ -28,6 +31,7 @@ media/
 # Git
 .git/
 .gitignore
+.github/
 
 # Documentation
 *.md

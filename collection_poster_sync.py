@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import logging
 import hashlib
 import time
@@ -8,6 +9,8 @@ import platform
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import local
 
 __version__ = "1.0.2"
 
@@ -46,11 +49,15 @@ class CollectionPosterSync:
         )
         self.REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
         self.MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+        self.MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))  # Thread pool size
 
         # Supported image formats
         self.IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".tbn"]
 
-        # Setup requests session with retry strategy
+        # Cache file path (stored alongside poster folder)
+        self.CACHE_FILE = os.path.join(self.POSTER_FOLDER, ".poster_cache.json")
+
+        # Setup requests session with retry strategy and connection pooling
         self.session = requests.Session()
         retry_strategy = Retry(
             total=self.MAX_RETRIES,
@@ -58,9 +65,17 @@ class CollectionPosterSync:
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["GET", "POST"],
         )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
+        # Tune connection pool for better performance with threading
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=20,
+            pool_maxsize=20,
+        )
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
+
+        # Thread-local storage for per-thread sessions
+        self._tls = local()
 
         # Setup logging with custom formatter
         class PrefixFormatter(logging.Formatter):
@@ -209,7 +224,7 @@ class CollectionPosterSync:
 
     def get_image_files(self):
         """
-        Get all image files from the poster folder.
+        Get all image files from the poster folder using os.scandir for better performance.
 
         Returns:
             List of tuples (filename, full_path, collection_name)
@@ -221,65 +236,55 @@ class CollectionPosterSync:
             return image_files
 
         try:
-            for filename in os.listdir(self.POSTER_FOLDER):
-                file_path = os.path.join(self.POSTER_FOLDER, filename)
-
-                # Skip directories
-                if os.path.isdir(file_path):
-                    continue
-
-                # Check if file has supported extension
-                _, ext = os.path.splitext(filename)
-                if ext.lower() in self.IMAGE_EXTENSIONS:
-                    # Verify file exists and is readable
-                    if not os.path.isfile(file_path):
-                        self.logger.warning(f"Skipping non-file: {file_path}")
+            with os.scandir(self.POSTER_FOLDER) as it:
+                for entry in it:
+                    # Skip directories and non-files
+                    if not entry.is_file():
                         continue
 
-                    # Extract collection name from filename (without extension)
-                    collection_name = os.path.splitext(filename)[0]
-                    image_files.append((filename, file_path, collection_name))
-                    self.logger.debug(
-                        f"Found image file: {filename} -> collection name: '{collection_name}'"
-                    )
+                    # Check if file has supported extension
+                    _, ext = os.path.splitext(entry.name)
+                    if ext.lower() in self.IMAGE_EXTENSIONS:
+                        # Extract collection name from filename (without extension)
+                        collection_name = os.path.splitext(entry.name)[0]
+                        image_files.append((entry.name, entry.path, collection_name))
+                        self.logger.debug(
+                            f"Found image file: {entry.name} -> collection name: '{collection_name}'"
+                        )
 
         except Exception as e:
             self.logger.error(f"Error reading poster folder: {e}")
 
         return image_files
 
-    def find_collection_by_name(self, target_name):
+    def index_collections(self):
         """
-        Find a Plex collection by normalized name.
-        Searches across all libraries.
-
-        Args:
-            target_name: The normalized collection name to find
+        Build a collection index once for O(1) lookups.
+        Maps normalized collection names to (collection, library_title, library_key) tuples.
 
         Returns:
-            Tuple of (Collection object, library_title, library_key) if found, (None, None, None) otherwise
+            Dictionary mapping normalized_name -> (collection, library_title, library_key)
         """
-        normalized_target = self.normalize_collection_name(target_name)
+        self.logger.info("Building collection index...")
+        collection_index = {}
 
         try:
-            # Get all libraries
             libraries = self.PLEX.library.sections()
+            total_collections = 0
 
             for library in libraries:
                 try:
-                    # Get all collections in this library
                     collections = library.collections()
-
                     for collection in collections:
-                        collection_normalized = self.normalize_collection_name(
+                        normalized_name = self.normalize_collection_name(
                             collection.title
                         )
-
-                        if collection_normalized == normalized_target:
-                            self.logger.debug(
-                                f"Found collection '{collection.title}' (ratingKey {collection.ratingKey}) in library '{library.title}' (section {library.key})"
-                            )
-                            return collection, library.title, library.key
+                        collection_index[normalized_name] = (
+                            collection,
+                            library.title,
+                            library.key,
+                        )
+                        total_collections += 1
 
                 except Exception as e:
                     self.logger.warning(
@@ -287,8 +292,35 @@ class CollectionPosterSync:
                     )
                     continue
 
+            self.logger.info(
+                f"Indexed {total_collections} collection(s) across {len(libraries)} library/libraries"
+            )
+
         except Exception as e:
-            self.logger.error(f"Error searching for collection: {e}")
+            self.logger.error(f"Error building collection index: {e}")
+
+        return collection_index
+
+    def find_collection_by_name(self, target_name, collection_index):
+        """
+        Find a Plex collection by normalized name using the pre-built index.
+
+        Args:
+            target_name: The collection name to find
+            collection_index: Pre-built collection index dictionary
+
+        Returns:
+            Tuple of (Collection object, library_title, library_key) if found, (None, None, None) otherwise
+        """
+        normalized_target = self.normalize_collection_name(target_name)
+        result = collection_index.get(normalized_target)
+
+        if result:
+            collection, library_title, library_key = result
+            self.logger.debug(
+                f"Found collection '{collection.title}' (ratingKey {collection.ratingKey}) in library '{library_title}' (section {library_key})"
+            )
+            return collection, library_title, library_key
 
         return None, None, None
 
@@ -316,7 +348,7 @@ class CollectionPosterSync:
 
     def calculate_file_hash(self, file_path):
         """
-        Calculate SHA256 hash of a file.
+        Calculate SHA256 hash of a file using optimized chunk size.
 
         Args:
             file_path: Path to the file
@@ -327,8 +359,9 @@ class CollectionPosterSync:
         try:
             self.logger.debug(f"Calculating hash for file: {file_path}")
             hash_sha256 = hashlib.sha256()
+            # Use 128 KB chunks for better performance
             with open(file_path, "rb") as f:
-                for chunk in iter(lambda: f.read(4096), b""):
+                for chunk in iter(lambda: f.read(131072), b""):  # 128 KiB
                     hash_sha256.update(chunk)
             file_hash = hash_sha256.hexdigest()
             self.logger.debug(f"File hash: {file_hash[:16]}...")
@@ -337,23 +370,90 @@ class CollectionPosterSync:
             self.logger.warning(f"Error calculating hash for {file_path}: {e}")
             return None
 
-    def get_current_poster_hash(self, collection):
+    def get_thread_session(self):
+        """
+        Get a thread-local requests session for parallel operations.
+
+        Returns:
+            requests.Session instance
+        """
+        if not hasattr(self._tls, "session"):
+            session = requests.Session()
+            retry_strategy = Retry(
+                total=self.MAX_RETRIES,
+                backoff_factor=1,
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["GET", "POST"],
+            )
+            adapter = HTTPAdapter(
+                max_retries=retry_strategy,
+                pool_connections=20,
+                pool_maxsize=20,
+            )
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+            # Copy headers from main session
+            session.headers.update(self.session.headers)
+            self._tls.session = session
+        return self._tls.session
+
+    def load_poster_cache(self):
+        """
+        Load poster state cache from JSON file.
+
+        Returns:
+            Dictionary mapping ratingKey -> {"local_hash": str, "poster_key": str}
+        """
+        if not os.path.exists(self.CACHE_FILE):
+            return {}
+
+        try:
+            with open(self.CACHE_FILE, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+                self.logger.debug(f"Loaded cache for {len(cache)} collection(s)")
+                return cache
+        except Exception as e:
+            self.logger.warning(f"Error loading cache file: {e}")
+            return {}
+
+    def save_poster_cache(self, cache):
+        """
+        Save poster state cache to JSON file.
+
+        Args:
+            cache: Dictionary mapping ratingKey -> {"local_hash": str, "poster_key": str}
+        """
+        try:
+            # Ensure poster folder exists
+            os.makedirs(os.path.dirname(self.CACHE_FILE), exist_ok=True)
+            with open(self.CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(cache, f, indent=2)
+            self.logger.debug(f"Saved cache for {len(cache)} collection(s)")
+        except Exception as e:
+            self.logger.warning(f"Error saving cache file: {e}")
+
+    def get_current_poster_hash(self, collection, session=None):
         """
         Download the current poster and calculate its hash.
+        Uses thread-local session if provided for parallel operations.
 
         Args:
             collection: Plex collection object
+            session: Optional requests.Session to use (for threading)
 
         Returns:
-            Hash of current poster, or None if error or no poster
+            Tuple of (hash, poster_key) if found, (None, None) otherwise
         """
+        if session is None:
+            session = self.session
+
         try:
             poster_key = self.get_current_poster_key(collection)
             if not poster_key:
                 self.logger.debug(
                     f"No current poster found for collection '{collection.title}'"
                 )
-                return None
+                return None, None
 
             self.logger.debug(
                 f"Downloading current poster for '{collection.title}' (key: {poster_key})"
@@ -363,7 +463,7 @@ class CollectionPosterSync:
             headers = {"X-Plex-Token": self.PLEX_TOKEN}
 
             # Download poster with retry logic
-            response = self.session.get(
+            response = session.get(
                 poster_url, headers=headers, timeout=self.REQUEST_TIMEOUT
             )
             if response.status_code == 200:
@@ -372,7 +472,7 @@ class CollectionPosterSync:
                 self.logger.debug(
                     f"Current poster hash for '{collection.title}': {hash_sha256[:16]}..."
                 )
-                return hash_sha256
+                return hash_sha256, poster_key
             else:
                 self.logger.warning(
                     f"Failed to download poster (status {response.status_code}) for '{collection.title}'"
@@ -382,7 +482,7 @@ class CollectionPosterSync:
                 f"Error getting current poster hash for '{collection.title}': {e}"
             )
 
-        return None
+        return None, None
 
     def upload_poster(self, collection, image_path):
         """
@@ -426,9 +526,143 @@ class CollectionPosterSync:
 
         return False
 
+    def process_image_file(
+        self, filename, image_path, collection_name, collection_index, cache
+    ):
+        """
+        Process a single image file (designed for parallel execution).
+
+        Args:
+            filename: Name of the image file
+            image_path: Full path to the image file
+            collection_name: Expected collection name (from filename)
+            collection_index: Pre-built collection index
+            cache: Poster state cache dictionary
+
+        Returns:
+            Tuple of (status, collection_rating_key, new_poster_key, local_hash)
+            where status is 'updated', 'skipped', or 'not_found'
+        """
+        self.logger.info("")
+        self.logger.info(f"Processing: {filename} -> collection: '{collection_name}'")
+
+        # Find collection in Plex using index
+        collection, library_title, library_key = self.find_collection_by_name(
+            collection_name, collection_index
+        )
+
+        if not collection:
+            self.logger.warning(f"Collection not found for image: {filename}")
+            return ("not_found", None, None, None)
+
+        # Log collection found with library info
+        if library_title and library_key:
+            self.logger.info(
+                f"Found collection '{collection.title}' (ratingKey {collection.ratingKey}) in library '{library_title}' (section {library_key})"
+            )
+        else:
+            self.logger.info(
+                f"Found collection '{collection.title}' (ratingKey {collection.ratingKey})"
+            )
+
+        rating_key = str(collection.ratingKey)
+
+        # Check if we need to update the poster
+        should_update = True
+        new_poster_key = None
+        local_hash = None
+
+        if not self.REAPPLY_POSTERS:
+            # Calculate hash of the image we want to upload
+            self.logger.debug(
+                "Comparing poster hashes to determine if update is needed"
+            )
+            local_hash = self.calculate_file_hash(image_path)
+
+            if local_hash:
+                # Check cache first
+                cached = cache.get(rating_key)
+                current_poster_key = self.get_current_poster_key(collection)
+
+                if cached and cached.get("local_hash") == local_hash:
+                    # Local file hasn't changed - check if Plex poster_key matches
+                    if current_poster_key == cached.get("poster_key"):
+                        # Both local file and Plex poster are unchanged
+                        self.logger.info(
+                            f"Poster for collection '{collection.title}' is already set to this image (cache hit), skipping"
+                        )
+                        should_update = False
+                    else:
+                        # Plex poster was changed externally - need to verify
+                        self.logger.debug(
+                            f"Plex poster changed (key mismatch), verifying..."
+                        )
+                        # Get thread-local session for parallel operations
+                        thread_session = self.get_thread_session()
+                        current_poster_hash, _ = self.get_current_poster_hash(
+                            collection, session=thread_session
+                        )
+                        if current_poster_hash == local_hash:
+                            # Actually matches, just poster_key changed (Plex internal change)
+                            self.logger.info(
+                                f"Poster for collection '{collection.title}' matches (poster_key changed), skipping"
+                            )
+                            should_update = False
+                            # Update cache with new poster_key
+                            cache[rating_key] = {
+                                "local_hash": local_hash,
+                                "poster_key": current_poster_key,
+                            }
+                        else:
+                            # Posters differ, need update
+                            self.logger.debug("Poster hashes differ - update needed")
+                elif current_poster_key:
+                    # Cache miss or local file changed - check current poster
+                    # Get thread-local session for parallel operations
+                    thread_session = self.get_thread_session()
+                    current_poster_hash, _ = self.get_current_poster_hash(
+                        collection, session=thread_session
+                    )
+                    if current_poster_hash == local_hash:
+                        # Hashes match, skip update
+                        self.logger.info(
+                            f"Poster for collection '{collection.title}' is already set to this image, skipping"
+                        )
+                        should_update = False
+                        # Update cache
+                        cache[rating_key] = {
+                            "local_hash": local_hash,
+                            "poster_key": current_poster_key,
+                        }
+                    else:
+                        self.logger.debug("Poster hashes differ - update needed")
+                else:
+                    self.logger.debug("No current poster found - update needed")
+            else:
+                self.logger.debug("Failed to calculate local hash - update needed")
+        else:
+            self.logger.debug("REAPPLY_POSTERS is enabled - forcing update")
+
+        # Upload the poster if needed
+        if should_update:
+            if self.upload_poster(collection, image_path):
+                # Update cache after successful upload
+                if local_hash:
+                    new_poster_key = self.get_current_poster_key(collection)
+                    cache[rating_key] = {
+                        "local_hash": local_hash,
+                        "poster_key": new_poster_key or "",
+                    }
+                return ("updated", rating_key, new_poster_key, local_hash)
+            else:
+                return ("skipped", rating_key, None, local_hash)
+        else:
+            return ("skipped", rating_key, None, local_hash)
+
     def sync_posters(self):
         """
         Main sync function: scan folder, find collections, and update posters.
+        Uses collection index and parallel processing for better performance.
         """
         self.logger.info("Starting poster sync process")
         self.logger.info(f"Poster folder: {self.POSTER_FOLDER}")
@@ -438,6 +672,15 @@ class CollectionPosterSync:
                 "Reapply posters is enabled. Posters will be reapplied for all collections."
             )
         self.logger.info(f"NORMALIZE_HYPHENS: {self.NORMALIZE_HYPHENS}")
+        self.logger.info(
+            f"Using {self.MAX_WORKERS} worker thread(s) for parallel processing"
+        )
+
+        # Build collection index once
+        collection_index = self.index_collections()
+
+        # Load poster state cache
+        cache = self.load_poster_cache()
 
         # Get all image files
         self.logger.info(f"Scanning poster folder: {self.POSTER_FOLDER}")
@@ -453,70 +696,40 @@ class CollectionPosterSync:
         skipped_count = 0
         not_found_count = 0
 
-        # Process each image file
-        for filename, image_path, collection_name in image_files:
-            self.logger.info("")
-            self.logger.info(
-                f"Processing: {filename} -> collection: '{collection_name}'"
-            )
+        # Process image files in parallel using thread pool
+        with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
+            # Submit all tasks
+            future_to_file = {
+                executor.submit(
+                    self.process_image_file,
+                    filename,
+                    image_path,
+                    collection_name,
+                    collection_index,
+                    cache,
+                ): (filename, image_path, collection_name)
+                for filename, image_path, collection_name in image_files
+            }
 
-            # Find collection in Plex
-            self.logger.debug(
-                f"Searching for collection with name: '{collection_name}'"
-            )
-            collection, library_title, library_key = self.find_collection_by_name(
-                collection_name
-            )
-
-            if not collection:
-                self.logger.warning(f"Collection not found for image: {filename}")
-                not_found_count += 1
-                continue
-
-            # Log collection found with library info
-            if library_title and library_key:
-                self.logger.info(
-                    f"Found collection '{collection.title}' (ratingKey {collection.ratingKey}) in library '{library_title}' (section {library_key})"
-                )
-            else:
-                self.logger.info(
-                    f"Found collection '{collection.title}' (ratingKey {collection.ratingKey})"
-                )
-
-            # Check if we need to update the poster
-            should_update = True
-
-            if not self.REAPPLY_POSTERS:
-                # Calculate hash of the image we want to upload
-                self.logger.debug(
-                    "Comparing poster hashes to determine if update is needed"
-                )
-                new_image_hash = self.calculate_file_hash(image_path)
-
-                if new_image_hash:
-                    # Get hash of current poster
-                    current_poster_hash = self.get_current_poster_hash(collection)
-
-                    # If hashes match, skip update
-                    if current_poster_hash and current_poster_hash == new_image_hash:
-                        self.logger.info(
-                            f"Poster for collection '{collection.title}' is already set to this image, skipping"
-                        )
-                        should_update = False
+            # Process completed tasks
+            for future in as_completed(future_to_file):
+                filename, image_path, collection_name = future_to_file[future]
+                try:
+                    status, rating_key, poster_key, local_hash = future.result()
+                    if status == "updated":
+                        updated_count += 1
+                    elif status == "skipped":
                         skipped_count += 1
-                    elif current_poster_hash:
-                        self.logger.debug(f"Poster hashes differ - update needed")
-                    else:
-                        self.logger.debug(f"No current poster found - update needed")
-            else:
-                self.logger.debug("REAPPLY_POSTERS is enabled - forcing update")
-
-            # Upload the poster if needed
-            if should_update:
-                if self.upload_poster(collection, image_path):
-                    updated_count += 1
-                else:
+                    elif status == "not_found":
+                        not_found_count += 1
+                except Exception as e:
+                    self.logger.error(
+                        f"Error processing {filename}: {e}", exc_info=True
+                    )
                     skipped_count += 1
+
+        # Save updated cache
+        self.save_poster_cache(cache)
 
         # Summary
         self.logger.info("")

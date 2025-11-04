@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.6
 FROM python:3.14-slim
 
 # Build arguments for user/group IDs (default: 1000:1000)
@@ -33,8 +34,9 @@ RUN getent group ${GROUP_ID} >/dev/null || groupadd -r -g ${GROUP_ID} appuser &&
 WORKDIR /app
 COPY ./requirements.txt ./requirements.txt
 
-# Install Python packages (optimized for speed and caching)
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+# Install Python packages (optimized for speed and caching with BuildKit cache mounts)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r /app/requirements.txt && \
     pip cache purge
 
@@ -51,5 +53,8 @@ RUN mkdir -p /app && \
 
 # Switch to non-root user (use numeric UID for reliability)
 USER ${USER_ID}:${GROUP_ID}
+
+# Set environment variable to prevent Python bytecode generation
+ENV PYTHONDONTWRITEBYTECODE=1
 
 CMD ./start.sh
