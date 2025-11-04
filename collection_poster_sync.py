@@ -6,11 +6,25 @@ import time
 import sys
 import platform
 import requests
-from plexapi.server import PlexServer
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 __version__ = "1.0.2"
+
+# Set plexapi environment variables BEFORE importing plexapi
+if "PLEXAPI_HEADER_IDENTIFIER" not in os.environ:
+    os.environ["PLEXAPI_HEADER_IDENTIFIER"] = "plex-collection-poster-sync"
+if "PLEXAPI_HEADER_DEVICE_NAME" not in os.environ:
+    os.environ["PLEXAPI_HEADER_DEVICE_NAME"] = "Collection Poster Sync"
+if "PLEXAPI_HEADER_DEVICE" not in os.environ:
+    os.environ["PLEXAPI_HEADER_DEVICE"] = "Docker"
+if "PLEXAPI_HEADER_PRODUCT" not in os.environ:
+    os.environ["PLEXAPI_HEADER_PRODUCT"] = "Plex Collection Poster Sync"
+if "PLEXAPI_HEADER_PLATFORM" not in os.environ:
+    detected_platform = platform.system()
+    os.environ["PLEXAPI_HEADER_PLATFORM"] = detected_platform
+
+from plexapi.server import PlexServer
 
 
 class CollectionPosterSync:
@@ -124,19 +138,9 @@ class CollectionPosterSync:
         # Connect to Plex
         try:
             self.logger.info(f"Connecting to Plex server at {self.PLEX_URL}")
-
-            # Use plexapi's supported environment variables to ensure stable device identification
-            if "PLEXAPI_HEADER_IDENTIFIER" not in os.environ:
-                os.environ["PLEXAPI_HEADER_IDENTIFIER"] = "plex-collection-poster-sync"
-            if "PLEXAPI_HEADER_DEVICE_NAME" not in os.environ:
-                os.environ["PLEXAPI_HEADER_DEVICE_NAME"] = "Collection Poster Sync"
-            if "PLEXAPI_HEADER_DEVICE" not in os.environ:
-                os.environ["PLEXAPI_HEADER_DEVICE"] = "Docker"
-            if "PLEXAPI_HEADER_PRODUCT" not in os.environ:
-                os.environ["PLEXAPI_HEADER_PRODUCT"] = "Plex Collection Poster Sync"
-            if "PLEXAPI_HEADER_PLATFORM" not in os.environ:
-                detected_platform = platform.system()
-                os.environ["PLEXAPI_HEADER_PLATFORM"] = detected_platform
+            self.logger.debug(
+                f"Using client identifier: {os.environ.get('PLEXAPI_HEADER_IDENTIFIER')}"
+            )
 
             # Also set headers on our session as a fallback
             plex_headers = {
@@ -144,24 +148,30 @@ class CollectionPosterSync:
                 "X-Plex-Product": os.environ["PLEXAPI_HEADER_PRODUCT"],
                 "X-Plex-Version": __version__,
                 "X-Plex-Device": os.environ["PLEXAPI_HEADER_DEVICE"],
-                "X-Plex-Device-Name": os.environ[
-                    "PLEXAPI_HEADER_DEVICE_NAME"
-                ],  # Required for proper device identification
+                "X-Plex-Device-Name": os.environ["PLEXAPI_HEADER_DEVICE_NAME"],
                 "X-Plex-Platform": os.environ["PLEXAPI_HEADER_PLATFORM"],
             }
 
             self.session.headers.update(plex_headers)
 
-            # Create PlexServer - plexapi will now use the stable headers from env vars
+            # Create PlexServer - plexapi will use the stable headers from env vars (set at module level)
             self.PLEX = PlexServer(self.PLEX_URL, self.PLEX_TOKEN, session=self.session)
 
-            # Ensure the PlexServer's session also has our headers (fallback)
+            # Ensure the PlexServer's session also has our headers
             if hasattr(self.PLEX, "_session") and self.PLEX._session:
                 self.PLEX._session.headers.update(plex_headers)
 
             # Also check for http_session which some versions of plexapi use
             if hasattr(self.PLEX, "http_session") and self.PLEX.http_session:
                 self.PLEX.http_session.headers.update(plex_headers)
+
+            # Log the identifier being used for debugging
+            actual_identifier = (
+                self.PLEX._session.headers.get("X-Plex-Client-Identifier")
+                if hasattr(self.PLEX, "_session")
+                else plex_headers["X-Plex-Client-Identifier"]
+            )
+            self.logger.debug(f"Connected with client identifier: {actual_identifier}")
 
             self.logger.info(f"Successfully connected to Plex server")
         except Exception as e:
