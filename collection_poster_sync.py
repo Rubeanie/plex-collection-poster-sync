@@ -12,7 +12,7 @@ from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import local
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 # Set plexapi environment variables BEFORE importing plexapi
 if "PLEXAPI_HEADER_IDENTIFIER" not in os.environ:
@@ -49,7 +49,8 @@ class CollectionPosterSync:
         )
         self.REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
         self.MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
-        self.MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))  # Thread pool size
+        # Reduced from 4 to 2 to prevent overwhelming server-side ImageMagick
+        self.MAX_WORKERS = int(os.getenv("MAX_WORKERS", "2"))  # Thread pool size
 
         # Supported image formats
         self.IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".tbn"]
@@ -144,6 +145,9 @@ class CollectionPosterSync:
             self.logger.addHandler(file_handler)
 
         self.logger.info("Starting collection poster sync script.")
+        self.logger.info(
+            f"Parallel workers: {self.MAX_WORKERS}"
+        )
 
         # Validate required configuration
         if not self.PLEX_URL or not self.PLEX_TOKEN:
@@ -240,6 +244,10 @@ class CollectionPosterSync:
                 for entry in it:
                     # Skip directories and non-files
                     if not entry.is_file():
+                        continue
+
+                    # Skip hidden files and cache files
+                    if entry.name.startswith("."):
                         continue
 
                     # Check if file has supported extension
@@ -512,6 +520,24 @@ class CollectionPosterSync:
                 )
                 return True
             except Exception as e:
+                error_str = str(e).lower()
+                # Check for ImageMagick-related errors or server-side crashes
+                if any(
+                    keyword in error_str
+                    for keyword in [
+                        "imagemagick",
+                        "convert",
+                        "magick",
+                        "abort",
+                        "signal",
+                    ]
+                ):
+                    self.logger.error(
+                        f"ImageMagick-related error uploading '{collection.title}': {e}. "
+                        f"Skipping upload to prevent server overload."
+                    )
+                    return False
+
                 if attempt < self.MAX_RETRIES - 1:
                     wait_time = 2**attempt  # Exponential backoff
                     self.logger.warning(
@@ -602,7 +628,20 @@ class CollectionPosterSync:
                         current_poster_hash, _ = self.get_current_poster_hash(
                             collection, session=thread_session
                         )
-                        if current_poster_hash == local_hash:
+                        if current_poster_hash is None:
+                            # Hash verification failed (network/server error) - trust cache to avoid unnecessary upload
+                            self.logger.warning(
+                                f"Could not verify poster hash for '{collection.title}' (server may be busy). "
+                                f"Trusting cache and skipping upload to prevent server overload."
+                            )
+                            should_update = False
+                            # Update cache with current poster_key in case it changed
+                            cache[rating_key] = {
+                                "local_hash": local_hash,
+                                "poster_key": current_poster_key
+                                or cached.get("poster_key", ""),
+                            }
+                        elif current_poster_hash == local_hash:
                             # Actually matches, just poster_key changed (Plex internal change)
                             self.logger.info(
                                 f"Poster for collection '{collection.title}' matches (poster_key changed), skipping"
@@ -623,7 +662,15 @@ class CollectionPosterSync:
                     current_poster_hash, _ = self.get_current_poster_hash(
                         collection, session=thread_session
                     )
-                    if current_poster_hash == local_hash:
+                    if current_poster_hash is None:
+                        # Hash verification failed - don't upload to avoid server overload
+                        # This prevents crashes when server is already stressed
+                        self.logger.warning(
+                            f"Could not verify poster hash for '{collection.title}' (server may be busy). "
+                            f"Skipping upload to prevent server overload. Will retry on next run."
+                        )
+                        should_update = False
+                    elif current_poster_hash == local_hash:
                         # Hashes match, skip update
                         self.logger.info(
                             f"Poster for collection '{collection.title}' is already set to this image, skipping"
