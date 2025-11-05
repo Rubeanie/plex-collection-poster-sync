@@ -49,7 +49,6 @@ class CollectionPosterSync:
         )
         self.REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
         self.MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
-        # Reduced from 4 to 2 to prevent overwhelming server-side ImageMagick
         self.MAX_WORKERS = int(os.getenv("MAX_WORKERS", "2"))  # Thread pool size
 
         # Supported image formats
@@ -145,9 +144,7 @@ class CollectionPosterSync:
             self.logger.addHandler(file_handler)
 
         self.logger.info("Starting collection poster sync script.")
-        self.logger.info(
-            f"Parallel workers: {self.MAX_WORKERS}"
-        )
+        self.logger.info(f"Parallel workers: {self.MAX_WORKERS}")
 
         # Validate required configuration
         if not self.PLEX_URL or not self.PLEX_TOKEN:
