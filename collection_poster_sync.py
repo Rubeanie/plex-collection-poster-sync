@@ -12,7 +12,7 @@ from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import local
 
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 # Set plexapi environment variables BEFORE importing plexapi
 if "PLEXAPI_HEADER_IDENTIFIER" not in os.environ:
@@ -265,10 +265,11 @@ class CollectionPosterSync:
     def index_collections(self):
         """
         Build a collection index once for O(1) lookups.
-        Maps normalized collection names to (collection, library_title, library_key) tuples.
+        Maps normalized collection names to lists of (collection, library_title, library_key) tuples.
+        Supports multiple collections with the same name across different libraries.
 
         Returns:
-            Dictionary mapping normalized_name -> (collection, library_title, library_key)
+            Dictionary mapping normalized_name -> [(collection, library_title, library_key), ...]
         """
         self.logger.info("Building collection index...")
         collection_index = {}
@@ -284,10 +285,10 @@ class CollectionPosterSync:
                         normalized_name = self.normalize_collection_name(
                             collection.title
                         )
-                        collection_index[normalized_name] = (
-                            collection,
-                            library.title,
-                            library.key,
+                        if normalized_name not in collection_index:
+                            collection_index[normalized_name] = []
+                        collection_index[normalized_name].append(
+                            (collection, library.title, library.key)
                         )
                         total_collections += 1
 
@@ -306,28 +307,24 @@ class CollectionPosterSync:
 
         return collection_index
 
-    def find_collection_by_name(self, target_name, collection_index):
+    def find_collections_by_name(self, target_name, collection_index):
         """
-        Find a Plex collection by normalized name using the pre-built index.
+        Find all Plex collections matching the normalized name using the pre-built index.
 
         Args:
             target_name: The collection name to find
             collection_index: Pre-built collection index dictionary
 
         Returns:
-            Tuple of (Collection object, library_title, library_key) if found, (None, None, None) otherwise
+            List of (Collection object, library_title, library_key) tuples. Empty if none found.
         """
         normalized_target = self.normalize_collection_name(target_name)
-        result = collection_index.get(normalized_target)
-
-        if result:
-            collection, library_title, library_key = result
+        matches = collection_index.get(normalized_target, [])
+        for collection, library_title, library_key in matches:
             self.logger.debug(
                 f"Found collection '{collection.title}' (ratingKey {collection.ratingKey}) in library '{library_title}' (section {library_key})"
             )
-            return collection, library_title, library_key
-
-        return None, None, None
+        return matches
 
     def get_current_poster_key(self, collection):
         """
@@ -563,145 +560,146 @@ class CollectionPosterSync:
             cache: Poster state cache dictionary
 
         Returns:
-            Tuple of (status, collection_rating_key, new_poster_key, local_hash)
+            Tuple of (status, None, None, local_hash)
             where status is 'updated', 'skipped', or 'not_found'
         """
         self.logger.info("")
         self.logger.info(f"Processing: {filename} -> collection: '{collection_name}'")
 
-        # Find collection in Plex using index
-        collection, library_title, library_key = self.find_collection_by_name(
+        # Find all matching collections in Plex (same name can exist in multiple libraries)
+        matches = self.find_collections_by_name(
             collection_name, collection_index
         )
 
-        if not collection:
+        if not matches:
             self.logger.warning(f"Collection not found for image: {filename}")
             return ("not_found", None, None, None)
 
-        # Log collection found with library info
-        if library_title and library_key:
-            self.logger.info(
-                f"Found collection '{collection.title}' (ratingKey {collection.ratingKey}) in library '{library_title}' (section {library_key})"
-            )
-        else:
-            self.logger.info(
-                f"Found collection '{collection.title}' (ratingKey {collection.ratingKey})"
-            )
-
-        rating_key = str(collection.ratingKey)
-
-        # Check if we need to update the poster
-        should_update = True
-        new_poster_key = None
-        # Always calculate hash for cache updates, even if REAPPLY_POSTERS is enabled
+        # Always calculate hash once for cache updates
         local_hash = self.calculate_file_hash(image_path)
+        any_updated = False
 
-        if not self.REAPPLY_POSTERS:
-            # Comparing poster hashes to determine if update is needed
-            self.logger.debug(
-                "Comparing poster hashes to determine if update is needed"
-            )
+        for collection, library_title, library_key in matches:
+            # Log collection found with library info
+            if library_title and library_key:
+                self.logger.info(
+                    f"Found collection '{collection.title}' (ratingKey {collection.ratingKey}) in library '{library_title}' (section {library_key})"
+                )
+            else:
+                self.logger.info(
+                    f"Found collection '{collection.title}' (ratingKey {collection.ratingKey})"
+                )
 
-            if local_hash:
-                # Check cache first
-                cached = cache.get(rating_key)
-                current_poster_key = self.get_current_poster_key(collection)
+            rating_key = str(collection.ratingKey)
 
-                if cached and cached.get("local_hash") == local_hash:
-                    # Local file hasn't changed - check if Plex poster_key matches
-                    if current_poster_key == cached.get("poster_key"):
-                        # Both local file and Plex poster are unchanged
-                        self.logger.info(
-                            f"Poster for collection '{collection.title}' is already set to this image (cache hit), skipping"
-                        )
-                        should_update = False
-                    else:
-                        # Plex poster was changed externally - need to verify
-                        self.logger.debug(
-                            f"Plex poster changed (key mismatch), verifying..."
-                        )
+            # Check if we need to update the poster for this collection
+            should_update = True
+
+            if not self.REAPPLY_POSTERS:
+                # Comparing poster hashes to determine if update is needed
+                self.logger.debug(
+                    "Comparing poster hashes to determine if update is needed"
+                )
+
+                if local_hash:
+                    # Check cache first
+                    cached = cache.get(rating_key)
+                    current_poster_key = self.get_current_poster_key(collection)
+
+                    if cached and cached.get("local_hash") == local_hash:
+                        # Local file hasn't changed - check if Plex poster_key matches
+                        if current_poster_key == cached.get("poster_key"):
+                            # Both local file and Plex poster are unchanged
+                            self.logger.info(
+                                f"Poster for collection '{collection.title}' is already set to this image (cache hit), skipping"
+                            )
+                            should_update = False
+                        else:
+                            # Plex poster was changed externally - need to verify
+                            self.logger.debug(
+                                f"Plex poster changed (key mismatch), verifying..."
+                            )
+                            # Get thread-local session for parallel operations
+                            thread_session = self.get_thread_session()
+                            current_poster_hash, _ = self.get_current_poster_hash(
+                                collection, session=thread_session
+                            )
+                            if current_poster_hash is None:
+                                # Hash verification failed (network/server error) - trust cache to avoid unnecessary upload
+                                self.logger.warning(
+                                    f"Could not verify poster hash for '{collection.title}' (server may be busy). "
+                                    f"Trusting cache and skipping upload to prevent server overload."
+                                )
+                                should_update = False
+                                # Update cache with current poster_key in case it changed
+                                cache[rating_key] = {
+                                    "local_hash": local_hash,
+                                    "poster_key": current_poster_key
+                                    or cached.get("poster_key", ""),
+                                }
+                            elif current_poster_hash == local_hash:
+                                # Actually matches, just poster_key changed (Plex internal change)
+                                self.logger.info(
+                                    f"Poster for collection '{collection.title}' matches (poster_key changed), skipping"
+                                )
+                                should_update = False
+                                # Update cache with new poster_key
+                                cache[rating_key] = {
+                                    "local_hash": local_hash,
+                                    "poster_key": current_poster_key,
+                                }
+                            else:
+                                # Posters differ, need update
+                                self.logger.debug("Poster hashes differ - update needed")
+                    elif current_poster_key:
+                        # Cache miss or local file changed - check current poster
                         # Get thread-local session for parallel operations
                         thread_session = self.get_thread_session()
                         current_poster_hash, _ = self.get_current_poster_hash(
                             collection, session=thread_session
                         )
                         if current_poster_hash is None:
-                            # Hash verification failed (network/server error) - trust cache to avoid unnecessary upload
+                            # Hash verification failed - don't upload to avoid server overload
+                            # This prevents crashes when server is already stressed
                             self.logger.warning(
                                 f"Could not verify poster hash for '{collection.title}' (server may be busy). "
-                                f"Trusting cache and skipping upload to prevent server overload."
+                                f"Skipping upload to prevent server overload. Will retry on next run."
                             )
                             should_update = False
-                            # Update cache with current poster_key in case it changed
-                            cache[rating_key] = {
-                                "local_hash": local_hash,
-                                "poster_key": current_poster_key
-                                or cached.get("poster_key", ""),
-                            }
                         elif current_poster_hash == local_hash:
-                            # Actually matches, just poster_key changed (Plex internal change)
+                            # Hashes match, skip update
                             self.logger.info(
-                                f"Poster for collection '{collection.title}' matches (poster_key changed), skipping"
+                                f"Poster for collection '{collection.title}' is already set to this image, skipping"
                             )
                             should_update = False
-                            # Update cache with new poster_key
+                            # Update cache
                             cache[rating_key] = {
                                 "local_hash": local_hash,
                                 "poster_key": current_poster_key,
                             }
                         else:
-                            # Posters differ, need update
                             self.logger.debug("Poster hashes differ - update needed")
-                elif current_poster_key:
-                    # Cache miss or local file changed - check current poster
-                    # Get thread-local session for parallel operations
-                    thread_session = self.get_thread_session()
-                    current_poster_hash, _ = self.get_current_poster_hash(
-                        collection, session=thread_session
-                    )
-                    if current_poster_hash is None:
-                        # Hash verification failed - don't upload to avoid server overload
-                        # This prevents crashes when server is already stressed
-                        self.logger.warning(
-                            f"Could not verify poster hash for '{collection.title}' (server may be busy). "
-                            f"Skipping upload to prevent server overload. Will retry on next run."
-                        )
-                        should_update = False
-                    elif current_poster_hash == local_hash:
-                        # Hashes match, skip update
-                        self.logger.info(
-                            f"Poster for collection '{collection.title}' is already set to this image, skipping"
-                        )
-                        should_update = False
-                        # Update cache
+                    else:
+                        self.logger.debug("No current poster found - update needed")
+                else:
+                    self.logger.debug("Failed to calculate local hash - update needed")
+            else:
+                self.logger.debug("REAPPLY_POSTERS is enabled - forcing update")
+
+            # Upload the poster if needed for this collection
+            if should_update:
+                if self.upload_poster(collection, image_path):
+                    any_updated = True
+                    # Update cache after successful upload (always update if we have a hash)
+                    if local_hash:
+                        new_poster_key = self.get_current_poster_key(collection)
                         cache[rating_key] = {
                             "local_hash": local_hash,
-                            "poster_key": current_poster_key,
+                            "poster_key": new_poster_key or "",
                         }
-                    else:
-                        self.logger.debug("Poster hashes differ - update needed")
-                else:
-                    self.logger.debug("No current poster found - update needed")
-            else:
-                self.logger.debug("Failed to calculate local hash - update needed")
-        else:
-            self.logger.debug("REAPPLY_POSTERS is enabled - forcing update")
 
-        # Upload the poster if needed
-        if should_update:
-            if self.upload_poster(collection, image_path):
-                # Update cache after successful upload (always update if we have a hash)
-                if local_hash:
-                    new_poster_key = self.get_current_poster_key(collection)
-                    cache[rating_key] = {
-                        "local_hash": local_hash,
-                        "poster_key": new_poster_key or "",
-                    }
-                return ("updated", rating_key, new_poster_key, local_hash)
-            else:
-                return ("skipped", rating_key, None, local_hash)
-        else:
-            return ("skipped", rating_key, None, local_hash)
+        status = "updated" if any_updated else "skipped"
+        return (status, None, None, local_hash)
 
     def sync_posters(self):
         """
