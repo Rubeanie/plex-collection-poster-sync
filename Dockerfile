@@ -59,4 +59,5 @@ USER ${USER_ID}:${GROUP_ID}
 # No bytecode files; unbuffered stdout so log lines aren't lost on a crash
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
-CMD ./start.sh
+# Exec form so start.sh (and supercronic via exec) runs as PID 1 and receives signals directly
+CMD ["./start.sh"]
