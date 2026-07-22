@@ -22,7 +22,7 @@ fi
 
 # Check if RUN_ON_CREATION is enabled
 if [ -n "${RUN_ON_CREATION+1}" ] && [ "$RUN_ON_CREATION" = "true" ]; then
-  /usr/local/bin/python /app/collection_poster_sync.py
+  /usr/local/bin/python /app/collection_poster_sync.py || echo "RUN_ON_CREATION sync failed, continuing to scheduler" >&2
 fi
 
 # Start supercronic with -passthrough-logs flag to suppress wrapper logs

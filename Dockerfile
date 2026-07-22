@@ -5,6 +5,8 @@ FROM python:3.14-slim
 ARG USER_ID=1000
 ARG GROUP_ID=1000
 ARG SUPERCRONIC_VERSION=0.2.38
+# Per-arch SUPERCRONIC_SHA1 sums below are published in the GitHub release notes
+# for this version — update them when bumping SUPERCRONIC_VERSION
 # TARGETARCH is automatically set by Docker Buildx for multi-architecture builds
 ARG TARGETARCH
 
@@ -12,16 +14,17 @@ ARG TARGETARCH
 RUN apt-get -y update && \
     apt-get -y install --no-install-recommends wget ca-certificates bash && \
     if [ "$TARGETARCH" = "amd64" ]; then \
-        ARCH_SUFFIX="amd64"; \
+        ARCH_SUFFIX="amd64"; SUPERCRONIC_SHA1="bc072eba2ae083849d5f86c6bd1f345f6ed902d0"; \
     elif [ "$TARGETARCH" = "arm64" ]; then \
-        ARCH_SUFFIX="arm64"; \
+        ARCH_SUFFIX="arm64"; SUPERCRONIC_SHA1="37842646e4c95b193c469afae400966565c383d3"; \
     elif [ "$TARGETARCH" = "arm" ]; then \
-        ARCH_SUFFIX="arm"; \
+        ARCH_SUFFIX="arm"; SUPERCRONIC_SHA1="510b84b031b78ebe25b1f00c91ced3434edcd383"; \
     else \
         echo "Unsupported architecture: $TARGETARCH" >&2 && exit 1; \
     fi && \
-    wget --tries=1 --timeout=10 --quiet -O /usr/local/bin/supercronic https://github.com/aptible/supercronic/releases/download/v${SUPERCRONIC_VERSION}/supercronic-linux-${ARCH_SUFFIX} && \
+    wget --tries=3 --timeout=10 --quiet -O /usr/local/bin/supercronic https://github.com/aptible/supercronic/releases/download/v${SUPERCRONIC_VERSION}/supercronic-linux-${ARCH_SUFFIX} && \
     test -s /usr/local/bin/supercronic || (echo "Failed to download supercronic binary or file is empty" >&2 && exit 1) && \
+    echo "${SUPERCRONIC_SHA1}  /usr/local/bin/supercronic" | sha1sum -c - && \
     chmod +x /usr/local/bin/supercronic && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
@@ -36,9 +39,8 @@ COPY ./requirements.txt ./requirements.txt
 
 # Install Python packages (optimized for speed and caching with BuildKit cache mounts)
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -r /app/requirements.txt && \
-    pip cache purge
+    pip install --upgrade pip setuptools wheel && \
+    pip install -r /app/requirements.txt
 
 # Copy application files
 COPY ./start.sh ./start.sh
@@ -54,7 +56,7 @@ RUN mkdir -p /app && \
 # Switch to non-root user (use numeric UID for reliability)
 USER ${USER_ID}:${GROUP_ID}
 
-# Set environment variable to prevent Python bytecode generation
-ENV PYTHONDONTWRITEBYTECODE=1
+# No bytecode files; unbuffered stdout so log lines aren't lost on a crash
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
 CMD ./start.sh

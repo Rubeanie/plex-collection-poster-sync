@@ -9,10 +9,11 @@ import platform
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import local
 
-__version__ = "1.0.4"
+__version__ = "1.1.0"
 
 # Set plexapi environment variables BEFORE importing plexapi
 if "PLEXAPI_HEADER_IDENTIFIER" not in os.environ:
@@ -28,6 +29,18 @@ if "PLEXAPI_HEADER_PLATFORM" not in os.environ:
     os.environ["PLEXAPI_HEADER_PLATFORM"] = detected_platform
 
 from plexapi.server import PlexServer
+
+
+def _env_int(name, default):
+    """Parse an integer environment variable, falling back to default and clamping to >= 1."""
+    try:
+        value = int(os.getenv(name, default))
+    except ValueError:
+        value = default
+    return max(value, 1)
+
+
+ImageFile = namedtuple("ImageFile", ["filename", "path", "collection_name"])
 
 
 class CollectionPosterSync:
@@ -47,9 +60,11 @@ class CollectionPosterSync:
         self.NORMALIZE_HYPHENS = (
             os.getenv("NORMALIZE_HYPHENS", "true").lower() == "true"
         )
-        self.REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
-        self.MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
-        self.MAX_WORKERS = int(os.getenv("MAX_WORKERS", "2"))  # Thread pool size
+        self.REQUEST_TIMEOUT = _env_int("REQUEST_TIMEOUT", 30)
+        self.MAX_RETRIES = _env_int("MAX_RETRIES", 3)
+        # Thread pool size. plexapi calls share one session; raising this
+        # multiplies concurrent upload load on Plex.
+        self.MAX_WORKERS = _env_int("MAX_WORKERS", 2)
 
         # Supported image formats
         self.IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".tbn"]
@@ -58,21 +73,7 @@ class CollectionPosterSync:
         self.CACHE_FILE = os.path.join(self.POSTER_FOLDER, ".poster_cache.json")
 
         # Setup requests session with retry strategy and connection pooling
-        self.session = requests.Session()
-        retry_strategy = Retry(
-            total=self.MAX_RETRIES,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "POST"],
-        )
-        # Tune connection pool for better performance with threading
-        adapter = HTTPAdapter(
-            max_retries=retry_strategy,
-            pool_connections=20,
-            pool_maxsize=20,
-        )
-        self.session.mount("http://", adapter)
-        self.session.mount("https://", adapter)
+        self.session = self._build_session()
 
         # Thread-local storage for per-thread sessions
         self._tls = local()
@@ -171,7 +172,12 @@ class CollectionPosterSync:
             self.session.headers.update(plex_headers)
 
             # Create PlexServer - plexapi will use the stable headers from env vars (set at module level)
-            self.PLEX = PlexServer(self.PLEX_URL, self.PLEX_TOKEN, session=self.session)
+            self.PLEX = PlexServer(
+                self.PLEX_URL,
+                self.PLEX_TOKEN,
+                session=self.session,
+                timeout=self.REQUEST_TIMEOUT,
+            )
 
             # Ensure the PlexServer's session also has our headers
             if hasattr(self.PLEX, "_session") and self.PLEX._session:
@@ -228,7 +234,7 @@ class CollectionPosterSync:
         Get all image files from the poster folder using os.scandir for better performance.
 
         Returns:
-            List of tuples (filename, full_path, collection_name)
+            List of ImageFile namedtuples (filename, path, collection_name)
         """
         image_files = []
 
@@ -252,7 +258,9 @@ class CollectionPosterSync:
                     if ext.lower() in self.IMAGE_EXTENSIONS:
                         # Extract collection name from filename (without extension)
                         collection_name = os.path.splitext(entry.name)[0]
-                        image_files.append((entry.name, entry.path, collection_name))
+                        image_files.append(
+                            ImageFile(entry.name, entry.path, collection_name)
+                        )
                         self.logger.debug(
                             f"Found image file: {entry.name} -> collection name: '{collection_name}'"
                         )
@@ -260,6 +268,8 @@ class CollectionPosterSync:
         except Exception as e:
             self.logger.error(f"Error reading poster folder: {e}")
 
+        # Sort so duplicate-name resolution picks a deterministic winner across runs
+        image_files.sort()
         return image_files
 
     def index_collections(self):
@@ -372,6 +382,32 @@ class CollectionPosterSync:
             self.logger.warning(f"Error calculating hash for {file_path}: {e}")
             return None
 
+    def _build_session(self):
+        """
+        Create a requests session with retry strategy and connection pooling.
+        Only GET is auto-retried; the non-idempotent upload POST is retried
+        solely by the bounded manual loop in upload_poster.
+
+        Returns:
+            requests.Session instance
+        """
+        session = requests.Session()
+        retry_strategy = Retry(
+            total=self.MAX_RETRIES,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET"],
+        )
+        # Tune connection pool for better performance with threading
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=20,
+            pool_maxsize=20,
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
+
     def get_thread_session(self):
         """
         Get a thread-local requests session for parallel operations.
@@ -380,20 +416,7 @@ class CollectionPosterSync:
             requests.Session instance
         """
         if not hasattr(self._tls, "session"):
-            session = requests.Session()
-            retry_strategy = Retry(
-                total=self.MAX_RETRIES,
-                backoff_factor=1,
-                status_forcelist=[429, 500, 502, 503, 504],
-                allowed_methods=["GET", "POST"],
-            )
-            adapter = HTTPAdapter(
-                max_retries=retry_strategy,
-                pool_connections=20,
-                pool_maxsize=20,
-            )
-            session.mount("http://", adapter)
-            session.mount("https://", adapter)
+            session = self._build_session()
             # Copy headers from main session
             session.headers.update(self.session.headers)
             self._tls.session = session
@@ -428,13 +451,16 @@ class CollectionPosterSync:
         try:
             # Ensure poster folder exists
             os.makedirs(os.path.dirname(self.CACHE_FILE), exist_ok=True)
-            with open(self.CACHE_FILE, "w", encoding="utf-8") as f:
+            # Write atomically so a crash mid-write can't corrupt the cache
+            tmp_path = self.CACHE_FILE + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(cache, f, indent=2)
+            os.replace(tmp_path, self.CACHE_FILE)
             self.logger.debug(f"Saved cache for {len(cache)} collection(s)")
         except Exception as e:
             self.logger.warning(f"Error saving cache file: {e}")
 
-    def get_current_poster_hash(self, collection, session=None):
+    def get_current_poster_hash(self, collection, session=None, poster_key=None):
         """
         Download the current poster and calculate its hash.
         Uses thread-local session if provided for parallel operations.
@@ -442,6 +468,7 @@ class CollectionPosterSync:
         Args:
             collection: Plex collection object
             session: Optional requests.Session to use (for threading)
+            poster_key: Optional already-fetched poster key (skips a lookup request)
 
         Returns:
             Tuple of (hash, poster_key) if found, (None, None) otherwise
@@ -450,7 +477,8 @@ class CollectionPosterSync:
             session = self.session
 
         try:
-            poster_key = self.get_current_poster_key(collection)
+            if poster_key is None:
+                poster_key = self.get_current_poster_key(collection)
             if not poster_key:
                 self.logger.debug(
                     f"No current poster found for collection '{collection.title}'"
@@ -560,8 +588,8 @@ class CollectionPosterSync:
             cache: Poster state cache dictionary
 
         Returns:
-            Tuple of (status, None, None, local_hash)
-            where status is 'updated', 'skipped', or 'not_found'
+            Status string: 'updated', 'skipped', 'error', or 'not_found'.
+            'error' means at least one upload failed after retries.
         """
         self.logger.info("")
         self.logger.info(f"Processing: {filename} -> collection: '{collection_name}'")
@@ -573,11 +601,12 @@ class CollectionPosterSync:
 
         if not matches:
             self.logger.warning(f"Collection not found for image: {filename}")
-            return ("not_found", None, None, None)
+            return "not_found"
 
         # Always calculate hash once for cache updates
         local_hash = self.calculate_file_hash(image_path)
         any_updated = False
+        any_failed = False
 
         for collection, library_title, library_key in matches:
             # Log collection found with library info
@@ -622,7 +651,9 @@ class CollectionPosterSync:
                             # Get thread-local session for parallel operations
                             thread_session = self.get_thread_session()
                             current_poster_hash, _ = self.get_current_poster_hash(
-                                collection, session=thread_session
+                                collection,
+                                session=thread_session,
+                                poster_key=current_poster_key,
                             )
                             if current_poster_hash is None:
                                 # Hash verification failed (network/server error) - trust cache to avoid unnecessary upload
@@ -656,7 +687,9 @@ class CollectionPosterSync:
                         # Get thread-local session for parallel operations
                         thread_session = self.get_thread_session()
                         current_poster_hash, _ = self.get_current_poster_hash(
-                            collection, session=thread_session
+                            collection,
+                            session=thread_session,
+                            poster_key=current_poster_key,
                         )
                         if current_poster_hash is None:
                             # Hash verification failed - don't upload to avoid server overload
@@ -697,9 +730,13 @@ class CollectionPosterSync:
                             "local_hash": local_hash,
                             "poster_key": new_poster_key or "",
                         }
+                else:
+                    any_failed = True
 
-        status = "updated" if any_updated else "skipped"
-        return (status, None, None, local_hash)
+        # A failed upload outranks a successful one so the run reports the error
+        if any_failed:
+            return "error"
+        return "updated" if any_updated else "skipped"
 
     def sync_posters(self):
         """
@@ -737,48 +774,68 @@ class CollectionPosterSync:
         updated_count = 0
         skipped_count = 0
         not_found_count = 0
+        error_count = 0
+
+        # Deduplicate files that resolve to the same collection so two threads
+        # never compare-and-upload against the same collection concurrently
+        unique_files = {}
+        for image_file in image_files:
+            key = self.normalize_collection_name(image_file.collection_name)
+            if key in unique_files:
+                self.logger.warning(
+                    f"Skipping '{image_file.filename}': same collection as '{unique_files[key].filename}'"
+                )
+                skipped_count += 1
+            else:
+                unique_files[key] = image_file
 
         # Process image files in parallel using thread pool
-        with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
-            # Submit all tasks
-            future_to_file = {
-                executor.submit(
-                    self.process_image_file,
-                    filename,
-                    image_path,
-                    collection_name,
-                    collection_index,
-                    cache,
-                ): (filename, image_path, collection_name)
-                for filename, image_path, collection_name in image_files
-            }
+        try:
+            with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
+                # Submit all tasks
+                future_to_file = {
+                    executor.submit(
+                        self.process_image_file,
+                        image_file.filename,
+                        image_file.path,
+                        image_file.collection_name,
+                        collection_index,
+                        cache,
+                    ): image_file
+                    for image_file in unique_files.values()
+                }
 
-            # Process completed tasks
-            for future in as_completed(future_to_file):
-                filename, image_path, collection_name = future_to_file[future]
-                try:
-                    status, rating_key, poster_key, local_hash = future.result()
-                    if status == "updated":
-                        updated_count += 1
-                    elif status == "skipped":
-                        skipped_count += 1
-                    elif status == "not_found":
-                        not_found_count += 1
-                except Exception as e:
-                    self.logger.error(
-                        f"Error processing {filename}: {e}", exc_info=True
-                    )
-                    skipped_count += 1
-
-        # Save updated cache
-        self.save_poster_cache(cache)
+                # Process completed tasks
+                for future in as_completed(future_to_file):
+                    image_file = future_to_file[future]
+                    try:
+                        status = future.result()
+                        if status == "updated":
+                            updated_count += 1
+                        elif status == "skipped":
+                            skipped_count += 1
+                        elif status == "not_found":
+                            not_found_count += 1
+                        elif status == "error":
+                            error_count += 1
+                    except Exception as e:
+                        self.logger.error(
+                            f"Error processing {image_file.filename}: {e}",
+                            exc_info=True,
+                        )
+                        error_count += 1
+        finally:
+            # Save the cache even if the run failed so completed work isn't lost
+            self.save_poster_cache(cache)
 
         # Summary
         self.logger.info("")
         self.logger.info(f"[SUC] Poster sync completed")
         self.logger.info(
-            f"Summary: Updated: {updated_count}, Skipped: {skipped_count}, Not found: {not_found_count}"
+            f"Summary: Updated: {updated_count}, Skipped: {skipped_count}, Not found: {not_found_count}, Errors: {error_count}"
         )
+        if error_count > 0:
+            sys.exit(1)
 
 
 if __name__ == "__main__":
