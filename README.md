@@ -36,7 +36,7 @@ services:
     restart: unless-stopped
     # user: "1000:1000" # Set the user/group IDs (default: 1000:1000)
     environment:
-      PLEX_URL: "http://localhost:32400" # Plex server URL (e.g., "http://192.168.0.139:32400")
+      PLEX_URL: "http://host.docker.internal:32400" # Plex server URL (e.g., "http://192.168.0.139:32400")
       PLEX_TOKEN: "PLEX TOKEN" # Plex authentication token
       POSTER_FOLDER: "/posters" # Path inside container where images folder is mounted
       CRON_SCHEDULE: "0 */8 * * *" # CRON expression for scheduled runs (every 8 hours by default)
